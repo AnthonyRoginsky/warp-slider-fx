@@ -233,6 +233,16 @@ void main() {
     canvas.setAttribute("aria-hidden", "true");
     Object.assign(canvas.style, { position: "absolute", inset: "0", width: "100%", height: "100%", pointerEvents: "none", zIndex: "2" });
     container.appendChild(canvas);
+    // Optional title layer: titles get their own canvas at a higher z-index
+    // (opts.textLayer), e.g. above dark fade overlays that cover the cards.
+    let tcanvas = null, tctx = null;
+    if (opts.textLayer && opts.textSelector) {
+      tcanvas = document.createElement("canvas");
+      tcanvas.setAttribute("aria-hidden", "true");
+      Object.assign(tcanvas.style, { position: "absolute", left: "0", right: "0", width: "100%", pointerEvents: "none", zIndex: String(opts.textLayer) });
+      container.appendChild(tcanvas);
+      tctx = tcanvas.getContext("2d");
+    }
 
     const gl = canvas.getContext("webgl2", { antialias: false, premultipliedAlpha: true });
     const scene = document.createElement("canvas");
@@ -313,8 +323,10 @@ void main() {
       const bandH = Math.max(1, Math.min(r.height, Math.max(r.width * 0.5625, sr.height * 1.15)));
       const top = Math.max(0, Math.min(r.height - bandH, sr.top + sr.height / 2 - r.top - bandH / 2));
       canvas.style.top = top + "px"; canvas.style.bottom = "auto"; canvas.style.height = bandH + "px";
+      if (tcanvas) { tcanvas.style.top = top + "px"; tcanvas.style.height = bandH + "px"; }
       const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(bandH * dpr));
       if (canvas.width !== w || canvas.height !== h) { canvas.width = scene.width = w; canvas.height = scene.height = h; }
+      if (tcanvas && (tcanvas.width !== w || tcanvas.height !== h)) { tcanvas.width = w; tcanvas.height = h; }
       if (gl && fbos.length && fbSize !== w + 'x' + h) {
         fbSize = w + 'x' + h;
         for (const { t, fb } of fbos) {
@@ -543,49 +555,65 @@ void main() {
       const dpr = canvas.width / Math.max(base.width, 1);
       const zs = 1 - (num(motion.zoomOut, 0) / 100) * zoomZ;   // e.g. 0.92 mid-slide, 1 when landed
       const zcx = scene.width / 2, zcy = scene.height / 2;
-      sctx.clearRect(0, 0, scene.width, scene.height);
-      if (bg) { sctx.fillStyle = bg; sctx.fillRect(0, 0, scene.width, scene.height); }
-      for (const img of imgs) {
-        if (!img.complete || !img.naturalWidth) { dirty = true; continue; }
-        const r = img.getBoundingClientRect();
-        if (r.right - lag < base.left - 50 || r.left - lag > base.right + 50) continue;
-        const dx = (r.left - base.left - lag) * dpr, dy = (r.top - base.top) * dpr;
-        const X = zcx + (dx - zcx) * zs, Y = zcy + (dy - zcy) * zs, W = r.width * dpr * zs, H = r.height * dpr * zs;
-        const rad = radiusOf(img) * dpr * zs;
-        if (rad > 0 && sctx.roundRect) { sctx.save(); sctx.beginPath(); sctx.roundRect(X, Y, W, H, Math.min(rad, W / 2, H / 2)); sctx.clip(); }
-        try { drawFitted(img, X, Y, W, H); }
-        catch (e) { console.warn("WarpFX: image blocked (CORS?)", img.src); }
-        if (overlaySel) drawOverlays(img, base, dpr, zs, zcx, zcy);   // gradient first,
-        if (textSel) drawTexts(img, base, dpr, zs, zcx, zcy);          // title stays bright on top
-        if (rad > 0 && sctx.roundRect) sctx.restore();
-      }
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, sceneTex);
-      try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, scene); }
-      catch (e) { console.warn("WarpFX: canvas tainted by a cross-origin image — enable CORS", e); api.setEnabled(false); return; }
-
-      // 2) Run the effect chain: scene → effect 1 → effect 2 → … → screen.
-      let input = sceneTex, flip = 0;
       const boost = reduceMotion ? 0 : velocity;
-      gl.bindBuffer(gl.ARRAY_BUFFER, quad);
-      chain.forEach((n, idx) => {
-        const last = idx === chain.length - 1;
-        const target = last ? null : fbos[idx % 2];
-        gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fb : null);
-        gl.viewport(0, 0, canvas.width, canvas.height);
-        const P = progs[n];
-        gl.useProgram(P.p);
-        gl.enableVertexAttribArray(P.aPos);
-        gl.vertexAttribPointer(P.aPos, 2, gl.FLOAT, false, 0, 0);
+      // textOnly: just the titles on a transparent picture (for the title layer).
+      const paint = (textOnly) => {
+        sctx.clearRect(0, 0, scene.width, scene.height);
+        if (bg && !textOnly) { sctx.fillStyle = bg; sctx.fillRect(0, 0, scene.width, scene.height); }
+        for (const img of imgs) {
+          if (!img.complete || !img.naturalWidth) { dirty = true; continue; }
+          const r = img.getBoundingClientRect();
+          if (r.right - lag < base.left - 50 || r.left - lag > base.right + 50) continue;
+          const dx = (r.left - base.left - lag) * dpr, dy = (r.top - base.top) * dpr;
+          const X = zcx + (dx - zcx) * zs, Y = zcy + (dy - zcy) * zs, W = r.width * dpr * zs, H = r.height * dpr * zs;
+          const rad = radiusOf(img) * dpr * zs;
+          if (rad > 0 && sctx.roundRect) { sctx.save(); sctx.beginPath(); sctx.roundRect(X, Y, W, H, Math.min(rad, W / 2, H / 2)); sctx.clip(); }
+          if (!textOnly) {
+            try { drawFitted(img, X, Y, W, H); }
+            catch (e) { console.warn("WarpFX: image blocked (CORS?)", img.src); }
+            if (overlaySel) drawOverlays(img, base, dpr, zs, zcx, zcy);   // gradient first,
+          }
+          if (textSel && (textOnly || !tcanvas)) drawTexts(img, base, dpr, zs, zcx, zcy);   // title on top
+          if (rad > 0 && sctx.roundRect) sctx.restore();
+        }
+      };
+      // 2) Run the effect chain: scene → effect 1 → effect 2 → … → screen.
+      const render = () => {
         gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, input);
-        P.U.i("uTex", 0); P.U.f2("uSize", canvas.width, canvas.height); P.U.i("uFlip", flip);
-        const S = settings[n];
-        EFFECTS[n].apply(P.U, S, canvas.width, canvas.height, boost * num(S.motionBoost, 0));
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
-        if (target) { input = target.t; flip = 1; }
-      });
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+        try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, scene); }
+        catch (e) { console.warn("WarpFX: canvas tainted by a cross-origin image — enable CORS", e); api.setEnabled(false); return false; }
+        let input = sceneTex, flip = 0;
+        gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+        chain.forEach((n, idx) => {
+          const last = idx === chain.length - 1;
+          const target = last ? null : fbos[idx % 2];
+          gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fb : null);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          const P = progs[n];
+          gl.useProgram(P.p);
+          gl.enableVertexAttribArray(P.aPos);
+          gl.vertexAttribPointer(P.aPos, 2, gl.FLOAT, false, 0, 0);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, input);
+          P.U.i("uTex", 0); P.U.f2("uSize", canvas.width, canvas.height); P.U.i("uFlip", flip);
+          const S = settings[n];
+          EFFECTS[n].apply(P.U, S, canvas.width, canvas.height, boost * num(S.motionBoost, 0));
+          gl.drawArrays(gl.TRIANGLES, 0, 6);
+          if (target) { input = target.t; flip = 1; }
+        });
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return true;
+      };
+      if (tcanvas) {
+        // Titles first: warp them with the same effect, copy to the title layer.
+        paint(true);
+        if (!render()) return;
+        tctx.clearRect(0, 0, tcanvas.width, tcanvas.height);
+        tctx.drawImage(canvas, 0, 0);
+      }
+      paint(false);
+      render();
     }
 
     const ro = new ResizeObserver(resize);
@@ -613,12 +641,13 @@ void main() {
         enabled = !!on && api.ok && chain.length > 0;
         slider.classList.toggle("warp-active", enabled);   // CSS hides the real images
         canvas.style.display = enabled ? "block" : "none";
+        if (tcanvas) tcanvas.style.display = enabled ? "block" : "none";
         dirty = true;
       },
       destroy() {
         cancelAnimationFrame(raf); ro.disconnect(); if (io) io.disconnect();
         slider.removeEventListener("load", onLoad, true);
-        slider.classList.remove("warp-active"); canvas.remove();
+        slider.classList.remove("warp-active"); canvas.remove(); if (tcanvas) tcanvas.remove();
       },
     };
 
@@ -990,6 +1019,7 @@ void main() {
       container: scope, effects: effects.length ? effects : ["edge-warp"], settings, live, presets, motion,
       imageSelector: imgSel,
       textSelector: el.getAttribute("data-fx-text") || (el.hasAttribute("data-fx-cards") ? ".title-bts-wrap > *" : ""),
+      textLayer: parseFloat(el.getAttribute("data-fx-text-layer")) || 0,
       overlaySelector: el.getAttribute("data-fx-overlay") || (el.hasAttribute("data-fx-cards") ? ".gradient" : ""),
       background: bgAttr === "none" || bgAttr === "transparent" ? null : (bgAttr || undefined),
     });
